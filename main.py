@@ -4,6 +4,24 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+import os
+import json
+
+def init_sheet():
+    scope = ["https://spreadsheets.google.com/feeds",
+             "https://www.googleapis.com/auth/drive"]
+
+    creds_dict = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+    client = gspread.authorize(creds)
+
+    sheet = client.open("SalesData").sheet1
+    return sheet
 
 
 # 📦 Product database (you can edit this)
@@ -38,38 +56,40 @@ def generate_bill(order):
     for name, qty in order:
         price = products.get(name, 0)
         amount = price * qty
-        total += amount
+        gst = amount * 0.18
+        final = amount + gst
 
-        bill_text += f"{name} x {qty} = ₹{amount}\n"
+        total += final
+
+        bill_text += f"{name} x {qty} = ₹{amount} + GST = ₹{final}\n"
 
     bill_text += f"\n💰 Total = ₹{total}"
-
     return bill_text, total
 
-
 # 📊 Save to Excel
-def save_to_excel(order, total):
-    rows = []
-
-    for name, qty in order:
-        price = products.get(name, 0)
-        rows.append({
-            "Date": datetime.now(),
-            "Item": name,
-            "Quantity": qty,
-            "Price": price,
-            "Total": price * qty
-        })
-
-    df = pd.DataFrame(rows)
-
+def save_to_sheets(order, total):
     try:
-        existing = pd.read_excel("sales.xlsx")
-        df = pd.concat([existing, df], ignore_index=True)
-    except FileNotFoundError:
-        pass
+        print("🚀 Saving to Google Sheets...")
 
-    df.to_excel("sales.xlsx", index=False)
+        for name, qty in order:
+            price = products.get(name, 0)
+            gst = price * qty * 0.18
+
+            sheet.append_row([
+                str(datetime.now()),
+                name,
+                qty,
+                price,
+                gst,
+                price * qty + gst
+            ])
+
+        print("✅ Saved to Google Sheets!")
+
+    except Exception as e:
+        print("❌ ERROR:", e)
+
+from reportlab.platypus import Image
 
 
 def generate_pdf(order, total):
@@ -80,21 +100,30 @@ def generate_pdf(order, total):
 
     content = []
 
-    content.append(Paragraph("🧾 BILL", styles["Title"]))
+    # 🖼️ Logo
+    content.append(Image("logo.png", width=100, height=50))
+    content.append(Spacer(1, 10))
+
+    content.append(Paragraph("DRFT MENS STORE", styles["Title"]))
+    content.append(Paragraph("GST Invoice", styles["Normal"]))
     content.append(Spacer(1, 10))
 
     for name, qty in order:
         price = products.get(name, 0)
         amount = price * qty
-        content.append(Paragraph(f"{name} x {qty} = ₹{amount}", styles["Normal"]))
+        gst = amount * 0.18
+        final = amount + gst
+
+        content.append(Paragraph(
+            f"{name} x {qty} = ₹{amount} + GST = ₹{final}",
+            styles["Normal"]
+        ))
 
     content.append(Spacer(1, 10))
     content.append(Paragraph(f"Total = ₹{total}", styles["Title"]))
 
     doc.build(content)
-
     return filename
-
 
 # 🤖 Handle message
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,8 +136,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     bill, total = generate_bill(order)
-    save_to_excel(order, total)
 
+    # ✅ FIXED LINE
+    save_to_sheets(order, total)
+
+    pdf_file = generate_pdf(order, total)
+
+    await update.message.reply_text(bill)
+    await update.message.reply_document(document=open(pdf_file, "rb"))
     # 🧾 Generate PDF
     pdf_file = generate_pdf(order, total)
 
